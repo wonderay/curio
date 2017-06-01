@@ -1,27 +1,33 @@
 # curio/subprocess.py
 #
-# Copyright (C) 2015
-# David Beazley (Dabeaz LLC), http://www.dabeaz.com
-# All rights reserved.
-#
-# Curio clone of the subprocess module.  
+# A curio-compatible standin for the subprocess module.  Provides
+# asynchronous compatible versions of Popen(), check_output(),
+# and run() functions.
 
-from .kernel import  new_task, sleep
-from .io import Stream
+__all__ = ['run', 'Popen', 'CompletedProcess', 'CalledProcessError',
+           'SubprocessError', 'check_output', 'PIPE', 'STDOUT', 'DEVNULL']
+
+# -- Standard Library
+
 import subprocess
-
-__all__ = [ 'run', 'Popen', 'CompletedProcess', 'CalledProcessError', 'TimeoutExpired', 'SubprocessError',
-            'check_output', 'PIPE', 'STDOUT', 'DEVNULL' ]
+import os
 
 from subprocess import (
     CompletedProcess,
-    SubprocessError, 
+    SubprocessError,
     CalledProcessError,
-    TimeoutExpired,
     PIPE,
     STDOUT,
     DEVNULL,
-    )
+)
+
+# -- Curio
+
+from .task import spawn, sleep
+from .errors import CancelledError
+from .io import FileStream
+from . import thread
+from .workers import run_in_thread
 
 class Popen(object):
     '''
@@ -29,66 +35,73 @@ class Popen(object):
     methods from subprocess.Popen should be available, but the associated file
     objects for stdin, stdout, stderr have been replaced by async versions.
     Certain blocking operations (e.g., wait() and communicate()) have been
-    replaced by async compatible implementations.
+    replaced by async compatible implementations.   Explicit timeouts
+    are not available. Use the timeout_after() function for timeouts.
     '''
+
     def __init__(self, args, **kwargs):
         if 'universal_newlines' in kwargs:
             raise RuntimeError('universal_newlines argument not supported')
 
+        # If stdin has been given and it's set to a curio FileStream object,
+        # then we need to flip it to blocking.
+        if 'stdin' in kwargs:
+            stdin = kwargs['stdin']
+            if isinstance(stdin, FileStream):
+                # At hell's heart I stab thy coroutine attempting to read from a stream
+                # that's been used as a pipe input to a subprocess.  Must set back to
+                # blocking or all hell breaks loose in the child.
+                os.set_blocking(stdin.fileno(), True)
+
         self._popen = subprocess.Popen(args, **kwargs)
+
         if self._popen.stdin:
-            self.stdin = Stream(self._popen.stdin)
+            self.stdin = FileStream(self._popen.stdin)
         if self._popen.stdout:
-            self.stdout = Stream(self._popen.stdout)
+            self.stdout = FileStream(self._popen.stdout)
         if self._popen.stderr:
-            self.stderr = Stream(self._popen.stderr)
+            self.stderr = FileStream(self._popen.stderr)
 
     def __getattr__(self, name):
         return getattr(self._popen, name)
 
-    async def wait(self, timeout=None):
-        async def waiter():
-            while True:
-                retcode = self._popen.poll()
-                if retcode is not None:
-                    return retcode
-                await sleep(0.0005)
-        task = await new_task(waiter())
-        try:
-            return await task.join(timeout=timeout)
-        except TimeoutError:
-            await task.cancel()
-            raise TimeoutExpired(self.args, timeout) from None
+    async def wait(self):
+        retcode = self._popen.poll()
+        if retcode is None:
+            retcode = await run_in_thread(self._popen.wait)
+        return retcode
 
-    async def communicate(self, input=b'', timeout=None):
-        if input:
-            assert self.stdin
-            async def writer():
+    async def communicate(self, input=b''):
+        '''
+        Communicates with a subprocess.  input argument gives data to
+        feed to the subprocess stdin stream.  Returns a tuple (stdout, stderr)
+        corresponding to the process output.  If cancelled, the resulting
+        cancellation exception has stdout_completed and stderr_completed
+        attributes attached containing the bytes read so far.
+        '''
+        stdout_task = await spawn(self.stdout.readall) if self.stdout else None
+        stderr_task = await spawn(self.stderr.readall) if self.stderr else None
+        try:
+            if input:
                 await self.stdin.write(input)
                 await self.stdin.close()
-            stdin_task = await writer()
-        else:
-            stdin_task = None
 
-        stdout_task = await new_task(self.stdout.readall()) if self.stdout else None
-        stderr_task = await new_task(self.stderr.readall()) if self.stderr else None
-
-        # Collect the output from the workers
-        try:
-            if stdin_task:
-                await stdin_task.join(timeout=timeout)
-            stdout = await stdout_task.join(timeout=timeout) if stdout_task else b''
-            stderr = await stderr_task.join(timeout=timeout) if stderr_task else b''
+            stdout = await stdout_task.join() if stdout_task else b''
+            stderr = await stderr_task.join() if stderr_task else b''
             return (stdout, stderr)
-        except TimeoutError:
-            await stdout_task.cancel()
-            await stderr_task.cancel()
-            if stdin_task:
-                await stdin_task.cancel()
-            raise
+        except CancelledError as err:
+            if stdout_task:
+                await stdout_task.cancel()
+                err.stdout = stdout_task.next_exc.bytes_read
+            else:
+                err.stdout = b''
 
-    def __enter__(self):
-        raise RuntimeError('Use async-with')
+            if stderr_task:
+                await stderr_task.cancel()
+                err.stderr = stderr_task.next_exc.bytes_read
+            else:
+                err.stderr = b''
+            raise
 
     async def __aenter__(self):
         return self
@@ -106,7 +119,14 @@ class Popen(object):
         # Wait for the process to terminate
         await self.wait()
 
-async def run(args, *, stdin=None, input=None, stdout=None, stderr=None, shell=False, timeout=None, check=False):
+    def __enter__(self):
+        return thread.AWAIT(self.__aenter__())
+
+    def __exit__(self, *args):
+        return thread.AWAIT(self.__aexit__(*args))
+
+
+async def run(args, *, stdin=None, input=None, stdout=None, stderr=None, shell=False, check=False):
     '''
     Curio-compatible version of subprocess.run()
     '''
@@ -117,11 +137,14 @@ async def run(args, *, stdin=None, input=None, stdout=None, stderr=None, shell=F
 
     async with Popen(args, stdin=stdin, stdout=stdout, stderr=stderr, shell=shell) as process:
         try:
-            stdout, stderr = await process.communicate(input, timeout)
-        except TimeoutError:
+            stdout, stderr = await process.communicate(input)
+        except CancelledError as err:
             process.kill()
             stdout, stderr = await process.communicate()
-            raise TimeoutExpired(process.args, timeout, output=stdout, stderr=stderr)
+            # Append the remaining stdout, stderr to the exception
+            err.stdout += stdout
+            err.stderr += stderr
+            raise err
         except:
             process.kill()
             raise
@@ -132,6 +155,11 @@ async def run(args, *, stdin=None, input=None, stdout=None, stderr=None, shell=F
                                  output=stdout, stderr=stderr)
     return CompletedProcess(process.args, retcode, stdout, stderr)
 
-async def check_output(args, *, stdin=None, stderr=None, shell=False, timeout=None):
-     out = await run(args, stdout=PIPE, stdin=stdin, stderr=stderr, shell=shell, timeout=timeout, check=True)
-     return out.stdout
+
+async def check_output(args, *, stdin=None, stderr=None, shell=False, input=None):
+    '''
+    Curio compatible version of subprocess.check_output()
+    '''
+    out = await run(args, stdout=PIPE, stdin=stdin, stderr=stderr, shell=shell,
+                    check=True, input=input)
+    return out.stdout

@@ -5,6 +5,7 @@
 import curio
 from curio import socket
 
+
 async def main(addr):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     await sock.connect(addr)
@@ -16,6 +17,9 @@ async def main(addr):
         assert msg == resp
     await sock.close()
 
+
 if __name__ == '__main__':
-    kernel = curio.Kernel()
-    kernel.run(main(('localhost', 26000)))
+    try:
+        curio.run(main, ('localhost', 26000))
+    except KeyboardInterrupt:
+        pass

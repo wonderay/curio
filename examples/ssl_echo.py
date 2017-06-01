@@ -2,13 +2,14 @@
 #
 # An example of a simple SSL echo server.   Use ssl_echo_client.py to test.
 
+import os
 import curio
 from curio import ssl
 from curio import network
-import time
 
-KEYFILE = "ssl_test_rsa"    # Private key
-CERTFILE = "ssl_test.crt"   # Certificate (self-signed)
+KEYFILE = 'ssl_test_rsa'    # Private key
+# Certificate (self-signed)
+CERTFILE = 'ssl_test.crt'
 
 async def handle(client, addr):
     print('Connection from', addr)
@@ -20,8 +21,11 @@ async def handle(client, addr):
             await client.send(data)
     print('Connection closed')
 
+
 if __name__ == '__main__':
-    kernel = curio.Kernel()
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_context.load_cert_chain(certfile=CERTFILE, keyfile=KEYFILE)
-    kernel.run(network.run_server('', 10000, handle, ssl=ssl_context)
+    try:
+        curio.run(network.tcp_server('', 10000, handle, ssl=ssl_context))
+    except KeyboardInterrupt:
+        pass

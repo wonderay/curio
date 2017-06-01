@@ -13,13 +13,16 @@ if len(sys.argv) > 1:
 else:
     MSGSIZE = 1
 
-msg = b'x'*MSGSIZE
+msg = b'x' * MSGSIZE
 
 sock = socket(AF_INET, SOCK_STREAM)
 sock.connect(('localhost', 25000))
+sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
 
 N = 0
 results = []
+
+
 def monitor():
     global N
     while True:
@@ -28,11 +31,15 @@ def monitor():
         results.append(N)
         N = 0
 
+
 Thread(target=monitor, daemon=True).start()
+
 
 def print_average():
     import statistics
     print('Average', statistics.mean(results), 'requests/sec')
+
+
 atexit.register(print_average)
 
 while True:

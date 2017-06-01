@@ -1,7 +1,8 @@
 # Example: A simple echo server written using streams
 
-from curio import Kernel, new_task
+from curio import run, spawn
 from curio.socket import *
+
 
 async def echo_server(address):
     sock = socket(AF_INET, SOCK_STREAM)
@@ -11,18 +12,21 @@ async def echo_server(address):
     print('Server listening at', address)
     async with sock:
         while True:
-             client, addr = await sock.accept()
-             print('Connection from', addr)
-             await new_task(echo_client(client))
+            client, addr = await sock.accept()
+            print('Connection from', addr)
+            await spawn(echo_client, client)
+
 
 async def echo_client(client):
-    reader, writer = client.make_streams()
-    async with reader, writer:
-         async for line in reader:
-             await writer.write(line)
+    s = client.as_stream()
+    async for line in s:
+        await s.write(line)
     await client.close()
     print('Connection closed')
 
+
 if __name__ == '__main__':
-     kernel = Kernel()
-     kernel.run(echo_server(('',25000)))
+    try:
+        run(echo_server, ('', 25000))
+    except KeyboardInterrupt:
+        pass

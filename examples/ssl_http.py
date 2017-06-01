@@ -1,33 +1,41 @@
-# ssl_echo
+# ssl_http
 #
 # An example of a simple SSL server.  To test, connect via browser
 
+import os
 import curio
 from curio import ssl
 import time
 
+
 KEYFILE = "ssl_test_rsa"    # Private key
-CERTFILE = "ssl_test.crt"   # Certificate (self-signed)
+# Certificate (self-signed)
+CERTFILE = "ssl_test.crt"
+
 
 async def handler(client, addr):
-    reader, writer = client.make_streams()
-    async with reader, writer:
-        async for line in reader:
-            line = line.strip()
-            if not line:
-                break
-            print(line)
+    s = client.as_stream()
+    async for line in s:
+        line = line.strip()
+        if not line:
+            break
+        print(line)
 
-        await writer.write(
-b'''HTTP/1.0 200 OK\r
+    await s.write(
+        b'''HTTP/1.0 200 OK\r
 Content-type: text/plain\r
 \r
 If you're seeing this, it probably worked. Yay!
 ''')
-        await writer.write(time.asctime().encode('ascii'))
+    await s.write(time.asctime().encode('ascii'))
+    await client.close()
+
 
 if __name__ == '__main__':
-    kernel = curio.Kernel()
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_context.load_cert_chain(certfile=CERTFILE, keyfile=KEYFILE)
-    kernel.run(curio.run_server('', 10000, handler, ssl=ssl_context))
+    print('Connect to https://localhost:10000 to see if it works')
+    try:
+        curio.run(curio.tcp_server('', 10000, handler, ssl=ssl_context))
+    except KeyboardInterrupt:
+        pass
